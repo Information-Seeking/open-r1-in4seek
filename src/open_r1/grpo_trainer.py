@@ -56,6 +56,9 @@ from trl.trainer.utils import (
     selective_log_softmax,
 )
 
+## Customized imports
+import random 
+
 
 if is_peft_available():
     from peft import PeftConfig, get_peft_model
@@ -498,6 +501,11 @@ class GRPOTrainer(Trainer):
                     guided_decoding=guided_decoding,
                     n=args.num_generations,
                 )
+                self.sampling_params_single = SamplingParams(
+                    temperature=args.temperature,
+                    max_tokens=self.max_completion_length,
+                    guided_decoding=guided_decoding,
+                )
 
             self._last_loaded_step = 0  # tag to avoid useless loading during grad accumulation
 
@@ -678,6 +686,7 @@ class GRPOTrainer(Trainer):
     ) -> dict[str, Union[torch.Tensor, Any]]:
         device = self.accelerator.device
         prompts = [x["prompt"] for x in inputs]
+        ground_truths = [x["ground_truth"] for x in inputs]
         prompts_text = [maybe_apply_chat_template(example, self.processing_class)["prompt"] for example in inputs]
         prompt_inputs = self.processing_class(
             prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
@@ -698,18 +707,63 @@ class GRPOTrainer(Trainer):
 
             # Generate completions using vLLM: gather all prompts and use them in a single call in the main process
             all_prompts_text = gather_object(prompts_text)
+            all_ground_truths = gather_object(ground_truths)
             if self.accelerator.is_main_process:
+                completion_ids = []
                 # Since 'prompts' contains 'num_generations' duplicates, we first take unique prompts, and generate
                 # num_generations outputs for each one. This is faster than generating outputs for each duplicate
                 # prompt individually.
+                # outputs = self.llm.generate(
+                #     all_prompts_text, sampling_params=self.sampling_params, use_tqdm=False
+                # )
+                # print(len(outputs))
+                # new_outputs = []
+                # num_gens = len(prompts)
+                # for i in range(0, len(outputs), num_gens):
+                #     group = outputs[i:i+num_gens]
+                    
+                #     # Check if "final diagnosis" exists in any completion in this group
+                #     has_final_diagnosis = any(
+                #         "final diagnosis" in self.processing_class.decode(out.outputs[0].token_ids).lower()
+                #         for out in group if out.outputs
+                #     )
+                #     if not has_final_diagnosis and len(group) > 0 and "symptoms are you facing today" in all_prompts_text[i]:
+                #         # Choose a random completion to replace
+                #         replace_idx = random.randint(0, min(num_gens, len(group)) - 1)
+                        
+                #         # Create a new text with "final diagnosis" inserted at a reasonable position
+                #         new_text = f"**Final Diagnosis:** {all_ground_truths[i]}"
+                        
+                #         # Tokenize the new text
+                #         new_token_ids = self.processing_class.encode(new_text)
+                        
+                #         # Replace the token_ids in the original completion
+                #         group[replace_idx].outputs[0].text = new_text
+                #         group[replace_idx].outputs[0].token_ids = new_token_ids
+                    
+                #     new_outputs.extend(group)
+                ## Then extract completion_ids from the processed outputs
+                # completion_ids = [out.token_ids for completions in new_outputs for out in completions.outputs]
                 ordered_set_of_prompts = list(dict.fromkeys(all_prompts_text))
                 all_outputs = self.llm.generate(
                     ordered_set_of_prompts, sampling_params=self.sampling_params, use_tqdm=False
                 )
-                completion_ids = []
-                for outputs in all_outputs:
+                for i, outputs in enumerate(all_outputs):
+                    has_final_diagnosis = False
+                    for output in outputs.outputs:
+                        if "final diagnosis" in self.processing_class.decode(output.token_ids).lower():
+                            has_final_diagnosis = True
+                            break
+                    if not has_final_diagnosis:
+                        replace_idx = random.randint(0, len(outputs.outputs) - 1)
+                        new_text = f"**Final Diagnosis:** {all_ground_truths[i * self.num_generations]}"
+                        new_token_ids = self.processing_class.encode(new_text)
+                        outputs.outputs[replace_idx].text = new_text
+                        outputs.outputs[replace_idx].token_ids = new_token_ids
+                    
                     for output in outputs.outputs:
                         completion_ids.append(output.token_ids)
+
             else:
                 completion_ids = [None] * len(all_prompts_text)
             # Broadcast the completions from the main process to all processes, ensuring each process receives its
