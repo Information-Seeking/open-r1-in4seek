@@ -47,7 +47,7 @@ def info_gain_reward(completions, prompts, ground_truth, case_vignette, choices,
     
     # prompts and completions should be a list of lists of dictionaries
     print(f"length of prompt: {len(prompts)}")
-    provider_prompt_list = [[{'role':'system', 'content':get_patient_prompt(case_vignette[i])}] + reverse_roles(prompts[i][1:]) + [{'role':'user', 'content':completions[i]}] for i in range(len(completions))] 
+    provider_prompt_list = [[{'role':'system', 'content':get_patient_prompt(case_vignette[i])}] + [{'role':'user', 'content':completions[i]}] for i in range(len(completions))] 
     print(f"info provider prompt: {provider_prompt_list[0]}")
     print("====================================================")
     # output = llm.chat(provider_prompt_list, sampling_params=sampling_params)

@@ -716,14 +716,10 @@ class GRPOTrainer(Trainer):
             # update running dialogue
             for i, j in enumerate(unterminated_indices):
                 running_dialogues_provider[j] += [answers[i]]
-            print(f"running_dialogues_provider: {running_dialogues_provider}")
-            print(f"seeker_instructions: {seeker_instructions}")
-            print(f"running_dialogues_seeker: {running_dialogues_seeker}")
             
             # figure out how to build the conv in the right order
             seeker_prompts = [build_conv(seeker_instructions[j], running_dialogues_provider[j], running_dialogues_seeker[j]) for i, j in enumerate(unterminated_indices)]
 
-            print(f"seeker_prompts: {seeker_prompts}")
             output = self.llm.chat(seeker_prompts, sampling_params=self.sampling_params, use_tqdm=False)
             questions = [output[i].outputs[0].text for i in range(len(output))]
 
@@ -737,8 +733,6 @@ class GRPOTrainer(Trainer):
         
         prompts = []
         for i in range(0, len(running_prompts)):
-            print(f"running_prompts[{i}]: {running_prompts[i]}")
-            print(f"")
             prompt_idx = random.randint(0, len(running_prompts[i])-2)
             prompts.append(running_prompts[i][prompt_idx])
         return prompts
@@ -773,9 +767,11 @@ class GRPOTrainer(Trainer):
                 provider_instructions = [get_patient_prompt(all_case_vignettes[i*num_gens]) for i in range(num_prompts)]
 
                 generated_prompts = self._gen_trajectories(seeker_instructions, provider_instructions, num_prompts, max_turns, termination_phrase)
-                
+                all_prompts = [prompt_list for prompt_list in generated_prompts for _ in range(num_gens)] 
                 outputs = self.llm.chat(generated_prompts, sampling_params=self.sampling_params, use_tqdm=False)
+                
                 completion_ids = [out.token_ids for completions in outputs for out in completions.outputs]
+
                
 
             else:
