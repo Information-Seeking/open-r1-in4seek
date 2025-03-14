@@ -681,22 +681,66 @@ class GRPOTrainer(Trainer):
             inputs = self._generate_and_score_completions(inputs)
         return inputs
 
+    def _gen_trajectories(self, seeker_instructions, provider_instructions, num_prompts, max_turns, termination_phrase):
+        model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+        running_dialogues_provider = [[] for i in range(num_prompts)]
+        running_dialogues_seeker = [["Hi! What symptoms are you facing today?"] for i in range(num_prompts)]
+        running_prompts = [[] for i in range(num_prompts)]
+        
+        unterminated_mask = np.array([True]*num_prompts)
+        
+        # use details to repopulate available info
+        for k in range(max_turns):
+            # break if all conversations terminated
+            if (np.sum(unterminated_mask) == 0):
+                break
+        
+            unterminated_indices = np.where(unterminated_mask)[0].tolist()
+        
+            provider_prompts = [self._build_conv(provider_instructions[j], [running_dialogues_seeker[j][-1]], [], role1 = "assistant", role2="user") for j in unterminated_indices]
+
+            output = [
+            self.client.chat.completions.create(
+                    model=model_name,
+                    messages=provider_prompt
+                ).choices[0].message.content
+                for provider_prompt in provider_prompts
+            ]
+            answers = [output[i] for i in range(len(output))]
+
+            # update running dialogue
+            for i, j in enumerate(unterminated_indices):
+                running_dialogues_provider[j] += [answers[i]]
+            
+            # figure out how to build the conv in the right order
+            seeker_prompts = [self._build_conv(seeker_instructions[j], running_dialogues_provider[j], running_dialogues_seeker[j]) for i, j in enumerate(unterminated_indices)]
+
+            output = self.llm.chat(seeker_prompts, sampling_params=self.sampling_params, use_tqdm=False)
+            questions = [output[i].outputs[0].text for i in range(len(output))]
+
+            # update running dialogue
+            for i, j in enumerate(unterminated_indices):
+                running_dialogues_seeker[j] += [questions[i]]
+                running_prompts[j] += [seeker_prompts[i]]
+
+            # update unterminated mask
+            unterminated_mask = [termination_phrase.lower() not in running_dialogues_seeker[j][-1].lower() for j in range(len(running_dialogues_seeker))]
+        
+        prompts = []
+        for i in range(0, len(running_prompts)):
+            prompt_idx = random.randint(0, len(running_prompts[i])-2)
+            prompts.append(running_prompts[i][prompt_idx])
+        return prompts
+
     def _generate_and_score_completions(
         self, inputs: dict[str, Union[torch.Tensor, Any]]
     ) -> dict[str, Union[torch.Tensor, Any]]:
         device = self.accelerator.device
-        prompts = [x["prompt"] for x in inputs]
+        initial_prompts = [x["prompt"] for x in inputs]
         ground_truths = [x["ground_truth"] for x in inputs]
-        prompts_text = [maybe_apply_chat_template(example, self.processing_class)["prompt"] for example in inputs]
-        prompt_inputs = self.processing_class(
-            prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
-        )
-        prompt_inputs = super()._prepare_inputs(prompt_inputs)
-        prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
+        case_vignettes = [x["case_vignette"] for x in inputs]
 
-        if self.max_prompt_length is not None:
-            prompt_ids = prompt_ids[:, -self.max_prompt_length :]
-            prompt_mask = prompt_mask[:, -self.max_prompt_length :]
+        self.client = openai.Client(base_url="http://localhost:8000/v1", api_key="dummy-key" )
 
         # Generate completions using either vLLM or regular generation
         if self.args.use_vllm:
@@ -706,74 +750,51 @@ class GRPOTrainer(Trainer):
                 self._last_loaded_step = self.state.global_step
 
             # Generate completions using vLLM: gather all prompts and use them in a single call in the main process
-            all_prompts_text = gather_object(prompts_text)
+            all_initial_prompts = gather_object([initial_prompts[0]])
             all_ground_truths = gather_object(ground_truths)
+            all_case_vignettes = gather_object(case_vignettes)
+            num_gens = len(initial_prompts)
             if self.accelerator.is_main_process:
-                completion_ids = []
-                # Since 'prompts' contains 'num_generations' duplicates, we first take unique prompts, and generate
-                # num_generations outputs for each one. This is faster than generating outputs for each duplicate
-                # prompt individually.
-                # outputs = self.llm.generate(
-                #     all_prompts_text, sampling_params=self.sampling_params, use_tqdm=False
-                # )
-                # print(len(outputs))
-                # new_outputs = []
-                # num_gens = len(prompts)
-                # for i in range(0, len(outputs), num_gens):
-                #     group = outputs[i:i+num_gens]
-                    
-                #     # Check if "final diagnosis" exists in any completion in this group
-                #     has_final_diagnosis = any(
-                #         "final diagnosis" in self.processing_class.decode(out.outputs[0].token_ids).lower()
-                #         for out in group if out.outputs
-                #     )
-                #     if not has_final_diagnosis and len(group) > 0 and "symptoms are you facing today" in all_prompts_text[i]:
-                #         # Choose a random completion to replace
-                #         replace_idx = random.randint(0, min(num_gens, len(group)) - 1)
-                        
-                #         # Create a new text with "final diagnosis" inserted at a reasonable position
-                #         new_text = f"**Final Diagnosis:** {all_ground_truths[i]}"
-                        
-                #         # Tokenize the new text
-                #         new_token_ids = self.processing_class.encode(new_text)
-                        
-                #         # Replace the token_ids in the original completion
-                #         group[replace_idx].outputs[0].text = new_text
-                #         group[replace_idx].outputs[0].token_ids = new_token_ids
-                    
-                #     new_outputs.extend(group)
-                ## Then extract completion_ids from the processed outputs
-                # completion_ids = [out.token_ids for completions in new_outputs for out in completions.outputs]
-                ordered_set_of_prompts = list(dict.fromkeys(all_prompts_text))
-                all_outputs = self.llm.generate(
-                    ordered_set_of_prompts, sampling_params=self.sampling_params, use_tqdm=False
-                )
-                for i, outputs in enumerate(all_outputs):
-                    has_final_diagnosis = False
-                    for output in outputs.outputs:
-                        if "final diagnosis" in self.processing_class.decode(output.token_ids).lower():
-                            has_final_diagnosis = True
-                            break
-                    if not has_final_diagnosis:
-                        replace_idx = random.randint(0, len(outputs.outputs) - 1)
-                        new_text = f"**Final Diagnosis:** {all_ground_truths[i * self.num_generations]}"
-                        new_token_ids = self.processing_class.encode(new_text)
-                        outputs.outputs[replace_idx].text = new_text
-                        outputs.outputs[replace_idx].token_ids = new_token_ids
-                    
-                    for output in outputs.outputs:
-                        completion_ids.append(output.token_ids)
+                num_prompts = len(all_initial_prompts)
+                max_turns = 20
+                termination_phrase = "Final Diagnosis"
+                seeker_instructions = all_initial_prompts
+                provider_instructions = [self._get_patient_prompt(all_case_vignettes[i*num_gens]) for i in range(num_prompts)]
+
+                generated_prompts = self._gen_trajectories(seeker_instructions, provider_instructions, num_prompts, max_turns, termination_phrase)
+                
+                outputs = self.llm.chat(generated_prompts, sampling_params=self.sampling_params, use_tqdm=False)
+                completion_ids = [out.token_ids for completions in outputs for out in completions.outputs]
+               
 
             else:
-                completion_ids = [None] * len(all_prompts_text)
+                all_prompts = [None] * len(all_ground_truths)
+                completion_ids = [None] * len(all_ground_truths)
             # Broadcast the completions from the main process to all processes, ensuring each process receives its
             # corresponding slice.
             completion_ids = broadcast_object_list(completion_ids, from_process=0)
+            all_prompts = broadcast_object_list(all_prompts, from_process=0)
+            
             process_slice = slice(
-                self.accelerator.process_index * len(prompts),
-                (self.accelerator.process_index + 1) * len(prompts),
+                self.accelerator.process_index * len(initial_prompts),
+                (self.accelerator.process_index + 1) * len(initial_prompts),
             )
+            
             completion_ids = completion_ids[process_slice]
+            prompts = all_prompts[process_slice]
+            
+            prompts_text = self.processing_class.apply_chat_template(prompts, tokenize=False, return_tensors="pt", add_generation_prompt=True)
+            
+            prompt_inputs = self.processing_class(
+                prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
+            )
+
+            prompt_inputs = super()._prepare_inputs(prompt_inputs)
+            prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
+            
+            if self.max_prompt_length is not None:
+                prompt_ids = prompt_ids[:, -self.max_prompt_length :]
+                prompt_mask = prompt_mask[:, -self.max_prompt_length :]
 
             # Pad the completions, and concatenate them with the prompts
             completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
@@ -786,6 +807,18 @@ class GRPOTrainer(Trainer):
                     prompt_ids, attention_mask=prompt_mask, generation_config=self.generation_config
                 )
 
+            prompts_text = [maybe_apply_chat_template(example, self.processing_class)["prompt"] for example in inputs]
+        
+            prompt_inputs = self.processing_class(
+                prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
+            )
+            prompt_inputs = super()._prepare_inputs(prompt_inputs)
+            prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
+
+            if self.max_prompt_length is not None:
+                prompt_ids = prompt_ids[:, -self.max_prompt_length :]
+                prompt_mask = prompt_mask[:, -self.max_prompt_length :]
+                
             # Compute prompt length and extract completion ids
             prompt_length = prompt_ids.size(1)
             prompt_ids = prompt_completion_ids[:, :prompt_length]

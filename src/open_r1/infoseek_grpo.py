@@ -154,8 +154,8 @@ def main(script_args, training_args, model_args):
 
     def process_dataset(example):
         messages = example["messages"]
-        text = tokenizer.apply_chat_template(messages, tokenize=False, return_tensors="pt", add_generation_prompt=True)
-        return {"prompt": text, "current_reward": 0, "case_vignette": example["case_vignette"], "question": example["question"], "choices": example["choices"], "ground_truth": example["ground_truth"]}
+        #text = tokenizer.apply_chat_template(messages, tokenize=False, return_tensors="pt", add_generation_prompt=True)
+        return {"prompt": messages, "current_reward": 0, "case_vignette": example["case_vignette"], "question": example["question"], "choices": example["choices"], "ground_truth": example["ground_truth"]}
 
     processed_dataset = dataset.map(process_dataset, remove_columns=["messages"])
 

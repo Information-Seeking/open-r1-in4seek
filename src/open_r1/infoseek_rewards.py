@@ -9,45 +9,7 @@ def helper_eval_responses(res):
         return 1
     else:
         return 0
-    
-def convert_to_dict_list(input_string):
-    """
-    Convert a string with Qwen-style header tags into a list of dictionaries with 'role' and 'content' keys.
-    Handles formats with <|im_start|>role\ncontent<|im_end|> pattern.
-    
-    Args:
-        input_string (str): The input string with Qwen header formatting
-        
-    Returns:
-        list: A list of dictionaries with 'role' and 'content' keys
-    """
-    result = []
-    
-    # Pattern to match content between <|im_start|> and <|im_end|> tags
-    # This captures the role (group 1) and the content (group 2)
-    pattern = r'<\|im_start\|>(.*?)\n([\s\S]*?)<\|im_end\|>'
-    
-    # Find all matches using the pattern
-    matches = re.findall(pattern, input_string, re.DOTALL)
-    
-    # If no matches found, print the input string and return empty list
-    if not matches:
-        print("No matches found. Input string:")
-        print(input_string)
-        return []
-    
-    # Process each match to create the dictionary entries
-    for role, content in matches:
-        role = role.strip().lower()
-        content = content.strip()
-        
-        result.append({
-            'role': role,
-            'content': content
-        })
-    
-    return result
-
+  
     
 def reverse_roles(message_list):
     """
@@ -85,10 +47,6 @@ def info_gain_reward(completions, prompts, ground_truth, case_vignette, choices,
     
     # prompts and completions should be a list of lists of dictionaries
     print(f"length of prompt: {len(prompts)}")
-    print(f"before convert_to_dict_list: {prompts[0]}")
-    prompts = [convert_to_dict_list(prompt) for prompt in prompts]
-    print(f"after convert_to_dict_list: {prompts[0]}")
-
     provider_prompt_list = [[{'role':'system', 'content':get_patient_prompt(case_vignette[i])}] + reverse_roles(prompts[i][1:]) + [{'role':'user', 'content':completions[i]}] for i in range(len(completions))] 
     print(f"info provider prompt: {provider_prompt_list[0]}")
     print("====================================================")
