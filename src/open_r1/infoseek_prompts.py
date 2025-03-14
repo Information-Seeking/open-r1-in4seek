@@ -1,3 +1,54 @@
+def build_conv(system_prompt, prompts, responses, role1 = "user", role2 = "assistant"):
+        dialogue = []
+        dialogue.append({
+                "role": "system",
+                "content": system_prompt
+            })
+        if (len(prompts) == 0):
+            return dialogue
+            
+        if (len(responses) > len(prompts)):
+            for i in range(len(prompts)):
+                dialogue.append({
+                    "role": role2,
+                    "content": responses[i]
+                })
+                dialogue.append({
+                    "role": role1,
+                    "content": prompts[i]
+                })
+                        
+            dialogue.append({
+                "role": role2,
+                "content": responses[-1]
+            })
+        elif (len(prompts) > len(responses)):
+            for i in range(len(responses)):
+                dialogue.append({
+                    "role": role2,
+                    "content": responses[i]
+                })
+                dialogue.append({
+                    "role": role1,
+                    "content": prompts[i]
+                })  
+            dialogue.append({
+                "role": role1,
+                "content": prompts[-1]
+            })
+        else:
+            for i in range(len(responses)):
+                dialogue.append({
+                    "role": role2,
+                    "content": responses[i]
+                })
+                dialogue.append({
+                    "role": role1,
+                    "content": prompts[i]
+                })
+
+        return dialogue
+
 def get_doctor_prompt():
     system_prompt = "You are an AI doctor."
     system_prompt += " Arrive at a diagnosis of a patient's medical condition."

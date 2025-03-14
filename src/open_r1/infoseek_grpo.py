@@ -48,12 +48,6 @@ from typing import Optional
 from infoseek_rewards import info_gain_reward, make_info_gain_reward
 from transformers import AutoTokenizer
 
-from vllm import LLM, SamplingParams
-from unittest.mock import patch
-import openai
-import re
-import numpy as np
-
 logger = logging.getLogger(__name__)
 
 

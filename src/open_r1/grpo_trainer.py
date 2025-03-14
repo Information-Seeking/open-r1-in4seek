@@ -58,6 +58,11 @@ from trl.trainer.utils import (
 
 ## Customized imports
 import random 
+import openai
+from vllm import LLM, SamplingParams
+from unittest.mock import patch
+import numpy as np
+from infoseek_prompts import get_patient_prompt, build_conv
 
 
 if is_peft_available():
@@ -682,7 +687,7 @@ class GRPOTrainer(Trainer):
         return inputs
 
     def _gen_trajectories(self, seeker_instructions, provider_instructions, num_prompts, max_turns, termination_phrase):
-        model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+        model_name = "meta-llama/Llama-3.1-8B-Instruct"
         running_dialogues_provider = [[] for i in range(num_prompts)]
         running_dialogues_seeker = [["Hi! What symptoms are you facing today?"] for i in range(num_prompts)]
         running_prompts = [[] for i in range(num_prompts)]
@@ -697,7 +702,7 @@ class GRPOTrainer(Trainer):
         
             unterminated_indices = np.where(unterminated_mask)[0].tolist()
         
-            provider_prompts = [self._build_conv(provider_instructions[j], [running_dialogues_seeker[j][-1]], [], role1 = "assistant", role2="user") for j in unterminated_indices]
+            provider_prompts = [build_conv(provider_instructions[j], [running_dialogues_seeker[j][-1]], [], role1 = "assistant", role2="user") for j in unterminated_indices]
 
             output = [
             self.client.chat.completions.create(
@@ -711,10 +716,14 @@ class GRPOTrainer(Trainer):
             # update running dialogue
             for i, j in enumerate(unterminated_indices):
                 running_dialogues_provider[j] += [answers[i]]
+            print(f"running_dialogues_provider: {running_dialogues_provider}")
+            print(f"seeker_instructions: {seeker_instructions}")
+            print(f"running_dialogues_seeker: {running_dialogues_seeker}")
             
             # figure out how to build the conv in the right order
-            seeker_prompts = [self._build_conv(seeker_instructions[j], running_dialogues_provider[j], running_dialogues_seeker[j]) for i, j in enumerate(unterminated_indices)]
+            seeker_prompts = [build_conv(seeker_instructions[j], running_dialogues_provider[j], running_dialogues_seeker[j]) for i, j in enumerate(unterminated_indices)]
 
+            print(f"seeker_prompts: {seeker_prompts}")
             output = self.llm.chat(seeker_prompts, sampling_params=self.sampling_params, use_tqdm=False)
             questions = [output[i].outputs[0].text for i in range(len(output))]
 
@@ -728,6 +737,8 @@ class GRPOTrainer(Trainer):
         
         prompts = []
         for i in range(0, len(running_prompts)):
+            print(f"running_prompts[{i}]: {running_prompts[i]}")
+            print(f"")
             prompt_idx = random.randint(0, len(running_prompts[i])-2)
             prompts.append(running_prompts[i][prompt_idx])
         return prompts
@@ -759,7 +770,7 @@ class GRPOTrainer(Trainer):
                 max_turns = 20
                 termination_phrase = "Final Diagnosis"
                 seeker_instructions = all_initial_prompts
-                provider_instructions = [self._get_patient_prompt(all_case_vignettes[i*num_gens]) for i in range(num_prompts)]
+                provider_instructions = [get_patient_prompt(all_case_vignettes[i*num_gens]) for i in range(num_prompts)]
 
                 generated_prompts = self._gen_trajectories(seeker_instructions, provider_instructions, num_prompts, max_turns, termination_phrase)
                 
