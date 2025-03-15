@@ -506,11 +506,6 @@ class GRPOTrainer(Trainer):
                     guided_decoding=guided_decoding,
                     n=args.num_generations,
                 )
-                self.sampling_params_single = SamplingParams(
-                    temperature=args.temperature,
-                    max_tokens=self.max_completion_length,
-                    guided_decoding=guided_decoding,
-                )
 
             self._last_loaded_step = 0  # tag to avoid useless loading during grad accumulation
 
@@ -687,7 +682,7 @@ class GRPOTrainer(Trainer):
         return inputs
 
     def _gen_trajectories(self, seeker_instructions, provider_instructions, num_prompts, max_turns, termination_phrase):
-        model_name = "meta-llama/Llama-3.1-8B-Instruct"
+        model_name = "Qwen/Qwen2.5-14B-Instruct"
         running_dialogues_provider = [[] for i in range(num_prompts)]
         running_dialogues_seeker = [["Hi! What symptoms are you facing today?"] for i in range(num_prompts)]
         running_prompts = [[] for i in range(num_prompts)]
