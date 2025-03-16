@@ -4,6 +4,8 @@ import re
 
 from math_prompts import build_conv
 
+
+
 def info_gain_reward(completions, prompts, ground_truth, case_vignette, choices, question, **kwargs):  #need ground_truth, choices, question, and case_vignette to be columns of the dataset
     """Reward function that adjusts rewards based on information gain."""
     num_samples = 10
