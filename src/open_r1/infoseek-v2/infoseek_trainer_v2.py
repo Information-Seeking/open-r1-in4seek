@@ -298,7 +298,7 @@ class GRPOTrainer(Trainer):
             model_init_kwargs["use_cache"] = (
                 False if args.gradient_checkpointing else model_init_kwargs.get("use_cache")
             )
-            model = AutoModelForCausalLM.from_pretrained(model, device_map="cuda", **model_init_kwargs)
+            model = AutoModelForCausalLM.from_pretrained(model, **model_init_kwargs)
         else:
             model_id = model.config._name_or_path
             if args.model_init_kwargs is not None:
@@ -322,7 +322,7 @@ class GRPOTrainer(Trainer):
             # If beta is 0.0, the reference model is not needed
             self.ref_model = None
         elif is_deepspeed_zero3_enabled():
-            self.ref_model = AutoModelForCausalLM.from_pretrained(model_id, device_map="cuda", **model_init_kwargs)
+            self.ref_model = AutoModelForCausalLM.from_pretrained(model_id, **model_init_kwargs)
         elif is_peft_model(model):
             # If PEFT is used, the reference model is not needed since the adapter can be disabled
             # to revert to the initial model.
@@ -341,7 +341,7 @@ class GRPOTrainer(Trainer):
         for i, reward_func in enumerate(reward_funcs):
             if isinstance(reward_func, str):
                 reward_funcs[i] = AutoModelForSequenceClassification.from_pretrained(
-                    reward_func, device_map="auto", num_labels=1, **model_init_kwargs
+                    reward_func, num_labels=1, **model_init_kwargs
                 )
         self.reward_funcs = reward_funcs
 
@@ -683,9 +683,9 @@ class GRPOTrainer(Trainer):
         return inputs
 
     def _gen_trajectories(self, seeker_instructions, provider_instructions, num_prompts, max_turns, termination_phrase):
-        model_name = "Qwen/Qwen2.5-14B-Instruct"
+        model_name = "Qwen/Qwen2.5-32B-Instruct"
         running_dialogues_provider = [[] for i in range(num_prompts)]
-        running_dialogues_seeker = [["Hi! What symptoms are you facing today?"] for i in range(num_prompts)]
+        running_dialogues_seeker = [[] for i in range(num_prompts)]
         running_prompts = [[] for i in range(num_prompts)]
         
         unterminated_mask = np.array([True]*num_prompts)
@@ -697,6 +697,19 @@ class GRPOTrainer(Trainer):
                 break
         
             unterminated_indices = np.where(unterminated_mask)[0].tolist()
+
+            # first iteration, seeker asks a question
+            if k == 0:
+                # figure out how to build the conv in the right order
+                seeker_prompts = [build_conv(seeker_instructions[j], running_dialogues_provider[j], running_dialogues_seeker[j]) for i, j in enumerate(unterminated_indices)]
+
+                output = self.llm.chat(seeker_prompts, sampling_params=self.sampling_params, use_tqdm=False)
+                questions = [output[i].outputs[0].text for i in range(len(output))]
+
+                # update running dialogue
+                for i, j in enumerate(unterminated_indices):
+                    running_dialogues_seeker[j] += [questions[i]]
+                    running_prompts[j] += [seeker_prompts[i]]
         
             provider_prompts = [build_conv(provider_instructions[j], [running_dialogues_seeker[j][-1]], [], role1 = "assistant", role2="user") for j in unterminated_indices]
 
@@ -908,7 +921,7 @@ class GRPOTrainer(Trainer):
         # Normalize the rewards to compute the advantages
         mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
         std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
-        advantages = (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
+        advantages = rewards #(rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
 
         # Slice to keep only the local part of the data
         process_slice = slice(

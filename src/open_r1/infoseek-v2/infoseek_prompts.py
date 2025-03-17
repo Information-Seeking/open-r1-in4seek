@@ -83,7 +83,7 @@ def get_mcq_after_conversation_prompt(choices, question):
     system_prompt += "\nChoices: "+ choices
     return system_prompt
 
-def get_frq_after_conversation_prompt(question):
+def get_frq_after_conversation_prompt():
     # Prompt used for conversation + FRQ
     system_prompt = f" Stop asking questions now. What is the most likely diagnosis?"
     system_prompt += " Give the answer as a short response based on the patient's above symptoms."
