@@ -42,27 +42,19 @@ from transformers import (
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.utils import is_peft_available
 
-from trl.data_utils import apply_chat_template, is_conversational, maybe_apply_chat_template
-from trl.extras.profiling import profiling_decorator
-from trl.import_utils import is_rich_available, is_vllm_available
-from trl.models import create_reference_model, prepare_deepspeed, unwrap_model_for_generation
-from trl.trainer.callbacks import SyncRefModelCallback
-from trl.trainer.grpo_config import GRPOConfig
-from trl.trainer.utils import (
+from ..data_utils import apply_chat_template, is_conversational, maybe_apply_chat_template
+from ..extras.profiling import profiling_decorator
+from ..import_utils import is_rich_available, is_vllm_available
+from ..models import create_reference_model, prepare_deepspeed, unwrap_model_for_generation
+from .callbacks import SyncRefModelCallback
+from .grpo_config import GRPOConfig
+from .utils import (
     generate_model_card,
     get_comet_experiment_url,
     pad,
     print_prompt_completions_sample,
     selective_log_softmax,
 )
-
-## Customized imports
-import random 
-import openai
-from vllm import LLM, SamplingParams
-from unittest.mock import patch
-import numpy as np
-from infoseek_prompts import get_patient_prompt, build_conv
 
 
 if is_peft_available():
@@ -276,7 +268,6 @@ class GRPOTrainer(Trainer):
             model_name = model if isinstance(model, str) else model.config._name_or_path
             model_name = model_name.split("/")[-1]
             args = GRPOConfig(f"{model_name}-GRPO")
-            
 
         # Models
         # Trained model
@@ -682,79 +673,21 @@ class GRPOTrainer(Trainer):
             inputs = self._generate_and_score_completions(inputs)
         return inputs
 
-    def _gen_trajectories(self, seeker_instructions, provider_instructions, num_prompts, max_turns, termination_phrase):
-        model_name = "Qwen/Qwen2.5-32B-Instruct"
-        running_dialogues_provider = [[] for i in range(num_prompts)]
-        running_dialogues_seeker = [[] for i in range(num_prompts)]
-        running_prompts = [[] for i in range(num_prompts)]
-        
-        unterminated_mask = np.array([True]*num_prompts)
-        
-        # use details to repopulate available info
-        for k in range(max_turns):
-            # break if all conversations terminated
-            if (np.sum(unterminated_mask) == 0):
-                break
-        
-            unterminated_indices = np.where(unterminated_mask)[0].tolist()
-
-            # first iteration, seeker asks a question
-            if k == 0:
-                # figure out how to build the conv in the right order
-                seeker_prompts = [build_conv(seeker_instructions[j], running_dialogues_provider[j], running_dialogues_seeker[j]) for i, j in enumerate(unterminated_indices)]
-
-                output = self.llm.chat(seeker_prompts, sampling_params=self.sampling_params, use_tqdm=False)
-                questions = [output[i].outputs[0].text for i in range(len(output))]
-
-                # update running dialogue
-                for i, j in enumerate(unterminated_indices):
-                    running_dialogues_seeker[j] += [questions[i]]
-                    running_prompts[j] += [seeker_prompts[i]]
-        
-            provider_prompts = [build_conv(provider_instructions[j], [running_dialogues_seeker[j][-1]], [], role1 = "assistant", role2="user") for j in unterminated_indices]
-
-            output = [
-            self.client.chat.completions.create(
-                    model=model_name,
-                    messages=provider_prompt
-                ).choices[0].message.content
-                for provider_prompt in provider_prompts
-            ]
-            answers = [output[i] for i in range(len(output))]
-
-            # update running dialogue
-            for i, j in enumerate(unterminated_indices):
-                running_dialogues_provider[j] += [answers[i]]
-            
-            # figure out how to build the conv in the right order
-            seeker_prompts = [build_conv(seeker_instructions[j], running_dialogues_provider[j], running_dialogues_seeker[j]) for i, j in enumerate(unterminated_indices)]
-
-            output = self.llm.chat(seeker_prompts, sampling_params=self.sampling_params, use_tqdm=False)
-            questions = [output[i].outputs[0].text for i in range(len(output))]
-
-            # update running dialogue
-            for i, j in enumerate(unterminated_indices):
-                running_dialogues_seeker[j] += [questions[i]]
-                running_prompts[j] += [seeker_prompts[i]]
-
-            # update unterminated mask
-            unterminated_mask = [termination_phrase.lower() not in running_dialogues_seeker[j][-1].lower() for j in range(len(running_dialogues_seeker))]
-        
-        prompts = []
-        for i in range(0, len(running_prompts)):
-            prompt_idx = random.randint(0, len(running_prompts[i])-2)
-            prompts.append(running_prompts[i][prompt_idx])
-        return prompts
-
     def _generate_and_score_completions(
         self, inputs: dict[str, Union[torch.Tensor, Any]]
     ) -> dict[str, Union[torch.Tensor, Any]]:
         device = self.accelerator.device
-        initial_prompts = [x["prompt"] for x in inputs]
-        ground_truths = [x["ground_truth"] for x in inputs]
-        case_vignettes = [x["case_vignette"] for x in inputs]
+        prompts = [x["prompt"] for x in inputs]
+        prompts_text = [maybe_apply_chat_template(example, self.processing_class)["prompt"] for example in inputs]
+        prompt_inputs = self.processing_class(
+            prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
+        )
+        prompt_inputs = super()._prepare_inputs(prompt_inputs)
+        prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
 
-        self.client = openai.Client(base_url="http://localhost:8000/v1", api_key="dummy-key" )
+        if self.max_prompt_length is not None:
+            prompt_ids = prompt_ids[:, -self.max_prompt_length :]
+            prompt_mask = prompt_mask[:, -self.max_prompt_length :]
 
         # Generate completions using either vLLM or regular generation
         if self.args.use_vllm:
@@ -764,51 +697,29 @@ class GRPOTrainer(Trainer):
                 self._last_loaded_step = self.state.global_step
 
             # Generate completions using vLLM: gather all prompts and use them in a single call in the main process
-            all_initial_prompts = gather_object([initial_prompts[0]])
-            all_ground_truths = gather_object(ground_truths)
-            all_case_vignettes = gather_object(case_vignettes)
-            num_gens = len(initial_prompts)
+            all_prompts_text = gather_object(prompts_text)
             if self.accelerator.is_main_process:
-                num_prompts = len(all_initial_prompts)
-                max_turns = 20
-                termination_phrase = "Final Diagnosis"
-                seeker_instructions = all_initial_prompts
-                provider_instructions = [get_patient_prompt(all_case_vignettes[i*num_gens]) for i in range(num_prompts)]
-
-                generated_prompts = self._gen_trajectories(seeker_instructions, provider_instructions, num_prompts, max_turns, termination_phrase)
-                all_prompts = [prompt_list for prompt_list in generated_prompts for _ in range(num_gens)] 
-                outputs = self.llm.chat(generated_prompts, sampling_params=self.sampling_params, use_tqdm=False)
-                
-                completion_ids = [out.token_ids for completions in outputs for out in completions.outputs]
-
+                # Since 'prompts' contains 'num_generations' duplicates, we first take unique prompts, and generate
+                # num_generations outputs for each one. This is faster than generating outputs for each duplicate
+                # prompt individually.
+                ordered_set_of_prompts = list(dict.fromkeys(all_prompts_text))
+                all_outputs = self.llm.generate(
+                    ordered_set_of_prompts, sampling_params=self.sampling_params, use_tqdm=False
+                )
+                completion_ids = []
+                for outputs in all_outputs:
+                    for output in outputs.outputs:
+                        completion_ids.append(output.token_ids)
             else:
-                all_prompts = [None] * len(all_ground_truths)
-                completion_ids = [None] * len(all_ground_truths)
+                completion_ids = [None] * len(all_prompts_text)
             # Broadcast the completions from the main process to all processes, ensuring each process receives its
             # corresponding slice.
             completion_ids = broadcast_object_list(completion_ids, from_process=0)
-            all_prompts = broadcast_object_list(all_prompts, from_process=0)
-            
             process_slice = slice(
-                self.accelerator.process_index * len(initial_prompts),
-                (self.accelerator.process_index + 1) * len(initial_prompts),
+                self.accelerator.process_index * len(prompts),
+                (self.accelerator.process_index + 1) * len(prompts),
             )
-            
             completion_ids = completion_ids[process_slice]
-            prompts = all_prompts[process_slice]
-            
-            prompts_text = self.processing_class.apply_chat_template(prompts, tokenize=False, return_tensors="pt", add_generation_prompt=True)
-            
-            prompt_inputs = self.processing_class(
-                prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
-            )
-
-            prompt_inputs = super()._prepare_inputs(prompt_inputs)
-            prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
-            
-            if self.max_prompt_length is not None:
-                prompt_ids = prompt_ids[:, -self.max_prompt_length :]
-                prompt_mask = prompt_mask[:, -self.max_prompt_length :]
 
             # Pad the completions, and concatenate them with the prompts
             completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
@@ -821,18 +732,6 @@ class GRPOTrainer(Trainer):
                     prompt_ids, attention_mask=prompt_mask, generation_config=self.generation_config
                 )
 
-            prompts_text = [maybe_apply_chat_template(example, self.processing_class)["prompt"] for example in inputs]
-        
-            prompt_inputs = self.processing_class(
-                prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
-            )
-            prompt_inputs = super()._prepare_inputs(prompt_inputs)
-            prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
-
-            if self.max_prompt_length is not None:
-                prompt_ids = prompt_ids[:, -self.max_prompt_length :]
-                prompt_mask = prompt_mask[:, -self.max_prompt_length :]
-                
             # Compute prompt length and extract completion ids
             prompt_length = prompt_ids.size(1)
             prompt_ids = prompt_completion_ids[:, :prompt_length]
@@ -919,7 +818,7 @@ class GRPOTrainer(Trainer):
         # Normalize the rewards to compute the advantages
         mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
         std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
-        advantages = rewards #(rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
+        advantages = (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
 
         # Slice to keep only the local part of the data
         process_slice = slice(
