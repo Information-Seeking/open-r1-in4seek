@@ -39,8 +39,8 @@ def reverse_roles(message_list):
 
 def info_gain_reward(completions, prompts, ground_truth, case_vignette, choices, question, **kwargs):  #need ground_truth, choices, question, and case_vignette to be columns of the dataset
     """Reward function that adjusts rewards based on information gain."""
-    num_samples = 10
-    model_name = "Qwen/Qwen2.5-32B-Instruct"
+    num_samples = 20
+    model_name = "Qwen/Qwen2.5-14B-Instruct"
     llm = kwargs.get("llm")
     sampling_params = kwargs.get("sampling_params")
     label_sampling_params = kwargs.get("label_sampling_params")
@@ -122,7 +122,7 @@ def info_gain_reward(completions, prompts, ground_truth, case_vignette, choices,
         ]
     frq_diagnosis_list = [output[i] for i in range(len(output))]
 
-    eval_prompt_list = [[{"role":"system","content":get_diagnosis_evaluation_prompt(ground_truth[int(i/num_samples)].lower(), frq_diagnosis_list[i].lower())}] for i in range(len(frq_diagnosis_list))]
+    eval_prompt_list = [[{"role":"system","content":get_diagnosis_evaluation_prompt(ground_truth[0].lower(), frq_diagnosis_list[i].lower())}] for i in range(len(frq_diagnosis_list))]
     # output = llm.chat(eval_prompt_list, sampling_params=sampling_params)
     # eval_list = [output[i].outputs[0].text for i in range(len(output))]
     

@@ -683,7 +683,7 @@ class GRPOTrainer(Trainer):
         return inputs
 
     def _gen_trajectories(self, seeker_instructions, provider_instructions, num_prompts, max_turns, termination_phrase):
-        model_name = "Qwen/Qwen2.5-32B-Instruct"
+        model_name = "Qwen/Qwen2.5-14B-Instruct"
         running_dialogues_provider = [[] for i in range(num_prompts)]
         running_dialogues_seeker = [[] for i in range(num_prompts)]
         running_prompts = [[] for i in range(num_prompts)]
