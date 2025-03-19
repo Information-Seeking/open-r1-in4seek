@@ -40,7 +40,7 @@ def reverse_roles(message_list):
 def info_gain_reward(completions, prompts, ground_truth, case_vignette, choices, question, **kwargs):  #need ground_truth, choices, question, and case_vignette to be columns of the dataset
     """Reward function that adjusts rewards based on information gain."""
     num_samples = 10
-    model_name = "Qwen/Qwen2.5-32B-Instruct"
+    model_name = "Qwen/Qwen2.5-14B-Instruct"
     llm = kwargs.get("llm")
     sampling_params = kwargs.get("sampling_params")
     label_sampling_params = kwargs.get("label_sampling_params")
