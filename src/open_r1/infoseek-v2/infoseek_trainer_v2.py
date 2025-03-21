@@ -702,8 +702,8 @@ class GRPOTrainer(Trainer):
             if k == 0:
                 # figure out how to build the conv in the right order
                 seeker_prompts = [build_conv(seeker_instructions[j], running_dialogues_provider[j], running_dialogues_seeker[j]) for i, j in enumerate(unterminated_indices)]
-
-                output = self.llm.chat(seeker_prompts, sampling_params=self.sampling_params, use_tqdm=False)
+                with torch.inference_mode():
+                    output = self.llm.chat(seeker_prompts, sampling_params=self.sampling_params, use_tqdm=False)
                 questions = [output[i].outputs[0].text for i in range(len(output))]
 
                 # update running dialogue
@@ -728,8 +728,8 @@ class GRPOTrainer(Trainer):
             
             # figure out how to build the conv in the right order
             seeker_prompts = [build_conv(seeker_instructions[j], running_dialogues_provider[j], running_dialogues_seeker[j]) for i, j in enumerate(unterminated_indices)]
-
-            output = self.llm.chat(seeker_prompts, sampling_params=self.sampling_params, use_tqdm=False)
+            with torch.inference_mode():
+                output = self.llm.chat(seeker_prompts, sampling_params=self.sampling_params, use_tqdm=False)
             questions = [output[i].outputs[0].text for i in range(len(output))]
 
             # update running dialogue
