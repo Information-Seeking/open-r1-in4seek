@@ -683,9 +683,9 @@ class GRPOTrainer(Trainer):
         return inputs
 
     def _gen_trajectories(self, seeker_instructions, provider_instructions, num_prompts, max_turns, termination_phrase):
-        model_name = "Qwen/Qwen2.5-14B-Instruct"
+        model_name = "Qwen/Qwen2.5-32B-Instruct"
         running_dialogues_provider = [[] for i in range(num_prompts)]
-        running_dialogues_seeker = [[] for i in range(num_prompts)]
+        running_dialogues_seeker = [["Hi! What symptoms are you facing today?"] for i in range(num_prompts)]
         running_prompts = [[] for i in range(num_prompts)]
         
         unterminated_mask = np.array([True]*num_prompts)
@@ -697,19 +697,6 @@ class GRPOTrainer(Trainer):
                 break
         
             unterminated_indices = np.where(unterminated_mask)[0].tolist()
-
-            # first iteration, seeker asks a question
-            if k == 0:
-                # figure out how to build the conv in the right order
-                seeker_prompts = [build_conv(seeker_instructions[j], running_dialogues_provider[j], running_dialogues_seeker[j]) for i, j in enumerate(unterminated_indices)]
-
-                output = self.llm.chat(seeker_prompts, sampling_params=self.sampling_params, use_tqdm=False)
-                questions = [output[i].outputs[0].text for i in range(len(output))]
-
-                # update running dialogue
-                for i, j in enumerate(unterminated_indices):
-                    running_dialogues_seeker[j] += [questions[i]]
-                    running_prompts[j] += [seeker_prompts[i]]
         
             provider_prompts = [build_conv(provider_instructions[j], [running_dialogues_seeker[j][-1]], [], role1 = "assistant", role2="user") for j in unterminated_indices]
 
