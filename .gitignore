@@ -1,5 +1,6 @@
 # shell scripts
 *.sh
+*.slurm
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
