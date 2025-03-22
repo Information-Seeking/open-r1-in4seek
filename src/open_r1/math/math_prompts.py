@@ -1,7 +1,6 @@
 import random
 
 def build_conv(question, prefix=""):
-    print(f"New Prompts")
     messages = [
         {
             "role": "user",
@@ -13,7 +12,7 @@ def build_conv(question, prefix=""):
         }
     ]
     if prefix != "":
-        messages[1]["content"] = messages[1]["content"] + prefix
+        messages[1]["content"] += prefix
     return messages
 
 def sample_prefixes(text, number_of_phrases):

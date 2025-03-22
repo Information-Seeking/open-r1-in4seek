@@ -45,7 +45,7 @@ from open_r1.utils.wandb_logging import init_wandb_training
 from trl import ModelConfig, ScriptArguments, TrlParser, get_peft_config
 from math_trainer import GRPOTrainer
 from typing import Optional
-from math_rewards import info_gain_reward, make_info_gain_reward
+from math_rewards import final_weighted_reward, make_final_weighted_reward
 from transformers import AutoTokenizer
 
 logger = logging.getLogger(__name__)
@@ -129,13 +129,13 @@ def main(script_args, training_args, model_args):
     sampling_params = None
     label_sampling_params = None
     REWARD_FUNCS_REGISTRY = {
-        "info_gain": info_gain_reward
+        "info_gain": final_weighted_reward
     }
     reward_funcs = []
     for func in script_args.reward_funcs:
         if func == "info_gain" :
             print(f"Register <info_gain> reward ")
-            reward_func = make_info_gain_reward(llm, sampling_params, label_sampling_params)
+            reward_func = make_final_weighted_reward(tokenizer, "no")
         else:
             print("Reward specification is wrong")
             exit()
