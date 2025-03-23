@@ -719,6 +719,7 @@ class GRPOTrainer(Trainer):
         problems = [x["problem"] for x in inputs]
         ground_truths = [x["ground_truth"] for x in inputs]
         prompts = [None for _ in problems]
+
         # print(f"[device {device}] length of problems: {len(problems)}")
         # print(f"[device {device}] problems: {problems}")
 
@@ -769,11 +770,15 @@ class GRPOTrainer(Trainer):
                     for i, prefixes in enumerate(all_prefixes):
                         problem = ordered_set_of_problems[i]
                         ground_truth = all_ground_truths[i * self.num_generations]
-                        convs = [build_conv(problem, prefix) for prefix in prefixes]
-                        prompts_text = []
-                        for conv in convs:
-                            # print(f"[device {device}] conv: {conv}")
+                        for prefix in prefixes:
+                            conv = build_conv(problem)
                             prompt_text = maybe_apply_chat_template({"prompt": conv}, self.processing_class)["prompt"]
+                            prompt_text += prefix
+                        # convs = [build_conv(problem, prefix) for prefix in prefixes]
+                        # prompts_text = []
+                        # for conv in convs:
+                        #     # print(f"[device {device}] conv: {conv}")
+                        #     prompt_text = maybe_apply_chat_template({"prompt": conv}, self.processing_class)["prompt"]
                             # if conv[-1]["content"] != "<think>\n":
                             prompt_text += """
     Time is up.
@@ -811,21 +816,22 @@ class GRPOTrainer(Trainer):
                     # all_rewards.append(rewards)
                 
                 # print(f"[device {device}] all responses: {all_responses}")
-                    print(f"[device {device}] all rewards: {all_rewards}")
+                    # print(f"[device {device}] all rewards: {all_rewards}")
                     # print(f"[device {device}] all prefixes: {all_prefixes}")
                     selected_prefixes, selected_rewards = self._select_responses_and_rewards(all_rewards, all_prefixes)
-                    print(f"[device {device}] selected prefixes: {selected_prefixes}")
-                    print(f"[device {device}] selected rewards: {selected_rewards}")
+                    # print(f"[device {device}] selected prefixes: {selected_prefixes}")
+                    # print(f"[device {device}] selected rewards: {selected_rewards}")
                 # convs = [build_conv(problem, prefix) for problem, prefix in zip(ordered_set_of_problems, selected_prefixes) for _ in range(self.num_generations)]
                 all_prompts = [build_conv(problem, prefix) for problem, prefix in zip(ordered_set_of_problems, selected_prefixes) for _ in range(self.num_generations)]
+                base_rewards = [reward for reward in selected_rewards for _ in range(self.num_generations)]
                 all_prompts_text = []
                 for prompt in all_prompts:
-                    print(f"[device {device}] prompt: {prompt}")
+                    #print(f"[device {device}] prompt: {prompt}")
                     prompt_text = self.processing_class.apply_chat_template(
                         prompt[:-1], tokenize=False, continue_final_message=False, add_generation_prompt=True, return_tensors="pt"
                     )
                     prompt_text += prompt[-1]["content"]
-                    print(f"[device {device}] tokenized prompt: {prompt_text}")
+                    # print(f"[device {device}] tokenized prompt: {prompt_text}")
                     # prompt_text = maybe_apply_chat_template({"prompt": prompt}, self.processing_class)["prompt"]
                     # print(f"[device {device}] prompt text: {prompt_text}")
                     all_prompts_text.append(prompt_text)
@@ -842,10 +848,14 @@ class GRPOTrainer(Trainer):
                 completion_ids = [None] * len(all_problems)
                 all_prompts = [None] * len(all_problems)
                 all_prompts_text = [None] * len(all_problems)
+                base_rewards = [None] * len(all_problems)
             
             # Broadcast the completions from the main process to all processes, ensuring each process receives its
             # corresponding slice.
             all_prompts = broadcast_object_list(all_prompts, from_process=0)
+            base_rewards = broadcast_object_list(base_rewards, from_process=0)
+            # print(f"[device {device}] all prompts: {all_prompts}")
+            # print(f"[device {device}] all rewards: {base_rewards}")
             all_prompts_text = broadcast_object_list(all_prompts_text, from_process=0)
             completion_ids = broadcast_object_list(completion_ids, from_process=0)
             process_slice = slice(
@@ -859,8 +869,10 @@ class GRPOTrainer(Trainer):
             # print(f"[device {device}] process slice: {process_slice}")
             prompts = all_prompts[process_slice]
             prompts_text = all_prompts_text[process_slice]
-            print(f"[device {device}] prompts: {prompts}")
-            print(f"[device {device}] prompts text: {prompts_text}")
+            # base_rewards = all_rewards[process_slice]
+            # print(f"[device {device}] base_rewards: {base_rewards}")
+            # print(f"[device {device}] prompts: {prompts}")
+            # print(f"[device {device}] prompts text: {prompts_text}")
             prompt_inputs = self.processing_class(
                 prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
             )
@@ -959,10 +971,19 @@ class GRPOTrainer(Trainer):
         # Gather the reward per function: this part is crucial, because the rewards are normalized per group and the
         # completions may be distributed across processes
         rewards_per_func = gather(rewards_per_func)
+        # base_rewards = gather(base_rewards)
 
+        
         # Apply weights to each reward function's output and sum
+        base_rewards_tensor = torch.tensor(base_rewards, device=device)
+        # Subtract base_rewards from only the first column (index 0)
+        # print(f"[device {device}] before rewards per func: {rewards_per_func}")
+        rewards_per_func[:, 0] -= base_rewards_tensor
+        # print(f"[device {device}] base rewards: {base_rewards}")
+        # print(f"[device {device}] after rewards per func: {rewards_per_func}")
         rewards = (rewards_per_func * self.reward_weights.to(device).unsqueeze(0)).sum(dim=1)
 
+        
         # Compute grouped-wise rewards
         mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
         std_grouped_rewards = rewards.view(-1, self.num_generations).std(dim=1)
@@ -970,7 +991,7 @@ class GRPOTrainer(Trainer):
         # Normalize the rewards to compute the advantages
         mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
         std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
-        advantages = (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
+        advantages = rewards
 
         # Slice to keep only the local part of the data
         process_slice = slice(
