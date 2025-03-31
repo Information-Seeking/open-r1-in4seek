@@ -42,14 +42,16 @@ from open_r1.utils.wandb_logging import init_wandb_training
 # from trl import GRPOTrainer, ModelConfig, ScriptArguments, TrlParser, get_peft_config
 
 ## Customized imports
-from trl import ModelConfig, ScriptArguments, TrlParser, get_peft_config
-from infoseek_trainer_v3 import GRPOTrainer
+from trl import ModelConfig, ScriptArguments, TrlParser, get_peft_config, apply_chat_template
+from math_trainer import GRPOTrainer
 from typing import Optional
-from infoseek_rewards_v3 import info_gain_reward, make_info_gain_reward
+from math_rewards import final_weighted_reward, make_final_weighted_reward
 from transformers import AutoTokenizer
+from vllm import LLM, SamplingParams
 
 logger = logging.getLogger(__name__)
 
+import openai
 
 @dataclass
 class GRPOScriptArguments(ScriptArguments):
@@ -106,7 +108,6 @@ def main(script_args, training_args, model_args):
     last_checkpoint = None
     if os.path.isdir(training_args.output_dir):
         last_checkpoint = get_last_checkpoint(training_args.output_dir)
-        print(f"last_checkpoint: {last_checkpoint}")
     if last_checkpoint is not None and training_args.resume_from_checkpoint is None:
         logger.info(f"Checkpoint detected, resuming training at {last_checkpoint=}.")
 
@@ -126,17 +127,17 @@ def main(script_args, training_args, model_args):
     )
 
     # Get reward functions
-    llm = None
-    sampling_params = None
-    label_sampling_params = None
-    REWARD_FUNCS_REGISTRY = {
-        "info_gain": info_gain_reward
-    }
+
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "7"
+    reward_model_client = openai.Client(base_url="http://localhost:8000/v1", api_key="dummy-key" )
+    reward_model_path = "agentica-org/DeepScaleR-1.5B-Preview"
+    reward_model_tokenizer = AutoTokenizer.from_pretrained(reward_model_path)
+    
     reward_funcs = []
     for func in script_args.reward_funcs:
         if func == "info_gain" :
             print(f"Register <info_gain> reward ")
-            reward_func = make_info_gain_reward(llm, sampling_params, label_sampling_params)
+            reward_func = make_final_weighted_reward(reward_model_client, reward_model_tokenizer, reward_model_path)
         else:
             print("Reward specification is wrong")
             exit()
@@ -148,11 +149,21 @@ def main(script_args, training_args, model_args):
         dataset["train"] = dataset["train"].select(range(script_args.dataset_start, script_args.dataset_end))
 
     def process_dataset(example):
-        messages = example["messages"]
-        #text = tokenizer.apply_chat_template(messages, tokenize=False, return_tensors="pt", add_generation_prompt=True)
-        return {"prompt": messages, "current_reward": 0, "case_vignette": example["case_vignette"], "question": example["question"], "choices": example["choices"], "ground_truth": example["ground_truth"]}
+        problem = example["problem"]
+        messages = [
+            {
+                "role": "user",
+                "content": f"Given the problem, generate a concise hint providing the most valuable insight for solving this problem.\n{problem}",
+            }
+        ]
+        # prompt = apply_chat_template(
+        #     messages = {"messages": messages},
+        #     tokenizer,
+        # )["text"]
+        return {"prompt": messages, "problem": example["problem"], "ground_truth": example["ground_truth"], "success_rate": example["success_rate"]}
 
-    processed_dataset = dataset.map(process_dataset, remove_columns=["messages"])
+    processed_dataset = dataset.map(process_dataset)
+
 
     logger.info("*** Initializing model kwargs ***")
     torch_dtype = (
@@ -187,14 +198,13 @@ def main(script_args, training_args, model_args):
     # Training loop
     ###############
     logger.info("*** Train ***")
+
     checkpoint = None
     if training_args.resume_from_checkpoint is not None:
         checkpoint = training_args.resume_from_checkpoint
     elif last_checkpoint is not None:
         checkpoint = last_checkpoint
-    
     print(f"checkpoint: {checkpoint}")
-    
     train_result = trainer.train(resume_from_checkpoint=checkpoint)
     metrics = train_result.metrics
     metrics["train_samples"] = len(dataset[script_args.dataset_train_split])
@@ -242,3 +252,5 @@ if __name__ == "__main__":
     parser = TrlParser((GRPOScriptArguments, GRPOConfig, ModelConfig))
     script_args, training_args, model_args = parser.parse_args_and_config()
     main(script_args, training_args, model_args)
+
+
