@@ -56,13 +56,13 @@ from trl.trainer.utils import (
     selective_log_softmax,
 )
 
-
-from math_prompts import build_conv, sample_prefixes
-from math_equivalence import evaluate_answer
-
-
-
-
+## Customized imports
+import random 
+import openai
+from vllm import LLM, SamplingParams
+from unittest.mock import patch
+import numpy as np
+from infoseek_prompts import get_patient_prompt, build_conv
 
 
 if is_peft_available():
@@ -276,6 +276,7 @@ class GRPOTrainer(Trainer):
             model_name = model if isinstance(model, str) else model.config._name_or_path
             model_name = model_name.split("/")[-1]
             args = GRPOConfig(f"{model_name}-GRPO")
+            
 
         # Models
         # Trained model
@@ -502,20 +503,9 @@ class GRPOTrainer(Trainer):
                 # Sampling parameters
                 self.sampling_params = SamplingParams(
                     temperature=args.temperature,
-                    max_tokens=4096,
-                    guided_decoding=guided_decoding,
-                    n=args.num_generations,
-                )
-                self.sampling_params_initial_rollout = SamplingParams(
-                    temperature=args.temperature,
                     max_tokens=self.max_completion_length,
                     guided_decoding=guided_decoding,
-                )
-                self.sampling_params_prm = SamplingParams(
-                    temperature=args.temperature,
-                    max_tokens=4096,
-                    guided_decoding=guided_decoding,
-                    n=10,
+                    n=args.num_generations,
                 )
 
             self._last_loaded_step = 0  # tag to avoid useless loading during grad accumulation
@@ -692,36 +682,66 @@ class GRPOTrainer(Trainer):
             inputs = self._generate_and_score_completions(inputs)
         return inputs
 
-    def _select_responses_and_rewards(self, all_rewards, all_responses):
-        selected_responses = []
-        selected_rewards = []
-        for rewards, responses in zip(all_rewards, all_responses):
-            # Find the index of the highest reward
-            if rewards:  # Check if the rewards list is not empty
-                max_reward = max(rewards)
-                # Get the index of the first occurrence of the maximum reward
-                max_index = rewards.index(max_reward)
-                # Append the corresponding response to the selected_responses list
-                selected_responses.append(responses[max_index])
-                # Append the corresponding reward to the selected_rewards list
-                selected_rewards.append(rewards[max_index])
-            else:
-                # If rewards are empty, default to the first response if available and append None as reward
-                print("Error")
-                exit()
-        return selected_responses, selected_rewards
+    def _gen_trajectories(self, seeker_instructions, provider_instructions, num_prompts, max_turns, termination_phrase):
+        model_name = "Qwen/Qwen2.5-32B-Instruct"
+        running_dialogues_provider = [[] for i in range(num_prompts)]
+        running_dialogues_seeker = [["Hi! What symptoms are you facing today?"] for i in range(num_prompts)]
+        running_prompts = [[] for i in range(num_prompts)]
+        
+        unterminated_mask = np.array([True]*num_prompts)
+        
+        # use details to repopulate available info
+        for k in range(max_turns):
+            # break if all conversations terminated
+            if (np.sum(unterminated_mask) == 0):
+                break
+        
+            unterminated_indices = np.where(unterminated_mask)[0].tolist()
+        
+            provider_prompts = [build_conv(provider_instructions[j], [running_dialogues_seeker[j][-1]], [], role1 = "assistant", role2="user") for j in unterminated_indices]
+
+            output = [
+            self.client.chat.completions.create(
+                    model=model_name,
+                    messages=provider_prompt
+                ).choices[0].message.content
+                for provider_prompt in provider_prompts
+            ]
+            answers = [output[i] for i in range(len(output))]
+
+            # update running dialogue
+            for i, j in enumerate(unterminated_indices):
+                running_dialogues_provider[j] += [answers[i]]
+            
+            # figure out how to build the conv in the right order
+            seeker_prompts = [build_conv(seeker_instructions[j], running_dialogues_provider[j], running_dialogues_seeker[j]) for i, j in enumerate(unterminated_indices)]
+            with torch.inference_mode():
+                output = self.llm.chat(seeker_prompts, sampling_params=self.sampling_params, use_tqdm=False)
+            questions = [output[i].outputs[0].text for i in range(len(output))]
+
+            # update running dialogue
+            for i, j in enumerate(unterminated_indices):
+                running_dialogues_seeker[j] += [questions[i]]
+                running_prompts[j] += [seeker_prompts[i]]
+
+            # update unterminated mask
+            unterminated_mask = [termination_phrase.lower() not in running_dialogues_seeker[j][-1].lower() for j in range(len(running_dialogues_seeker))]
+        
+        prompts = []
+        for i in range(0, len(running_prompts)):
+            prompt_idx = random.randint(0, len(running_prompts[i])-2)
+            prompts.append(running_prompts[i][prompt_idx])
+        return prompts
 
     def _generate_and_score_completions(
         self, inputs: dict[str, Union[torch.Tensor, Any]]
     ) -> dict[str, Union[torch.Tensor, Any]]:
         device = self.accelerator.device
-        ## Generate completions
-        problems = [x["problem"] for x in inputs]
+        initial_prompts = [x["prompt"] for x in inputs]
         ground_truths = [x["ground_truth"] for x in inputs]
-        prompts = [None for _ in problems]
+        case_vignettes = [x["case_vignette"] for x in inputs]
 
-        # print(f"[device {device}] length of problems: {len(problems)}")
-        # print(f"[device {device}] problems: {problems}")
+        self.client = openai.Client(base_url="http://localhost:8000/v1", api_key="dummy-key" )
 
         # Generate completions using either vLLM or regular generation
         if self.args.use_vllm:
@@ -731,159 +751,67 @@ class GRPOTrainer(Trainer):
                 self._last_loaded_step = self.state.global_step
 
             # Generate completions using vLLM: gather all prompts and use them in a single call in the main process
-            all_problems = gather_object(problems)
+            all_initial_prompts = gather_object([initial_prompts[0]])
             all_ground_truths = gather_object(ground_truths)
-            # print(f"[device {device}] length of all problems: {len(all_problems)}")
-
+            all_case_vignettes = gather_object(case_vignettes)
+            num_gens = len(initial_prompts)
             if self.accelerator.is_main_process:
-                # print(f"[device {device}] main process")
-                # print(f"[device {device}] all problems: {all_problems}")
-                with torch.inference_mode():
-                    ordered_set_of_problems = list(dict.fromkeys(all_problems))
-                    # ordered_set_of_ground_truths = list(dict.fromkeys(all_ground_truths))
+                num_prompts = len(all_initial_prompts)
+                max_turns = 20
+                termination_phrase = "Final Diagnosis"
+                seeker_instructions = all_initial_prompts
+                provider_instructions = [get_patient_prompt(all_case_vignettes[i*num_gens]) for i in range(num_prompts)]
 
-                    # print(f"[device {device}] ordered set of problems: {ordered_set_of_problems}")
-                    # print(f"[device {device}] ordered set of ground truths: {ordered_set_of_ground_truths}")
-                    convs = [build_conv(problem) for problem in ordered_set_of_problems]
-                    # print(f"[device {device}] convs: {convs}")
-                    prompts_text = [maybe_apply_chat_template({"prompt": conv}, self.processing_class)["prompt"] for conv in convs]
-                    # print(f"[device {device}] prompts text: {prompts_text}")
-                    # prompts_text_2 = self.processing_class.apply_chat_template(convs, tokenize=False, continue_final_message=False, add_generation_prompt=True, return_tensors="pt")
-                    # print(f"[device {device}] prompts text 2: {prompts_text_2}")
-
-                    all_outputs = self.llm.generate(
-                        prompts_text, sampling_params=self.sampling_params_initial_rollout, use_tqdm=False
-                    )
-                    initial_rollouts = []
-                    # print(f"[device {device}] initial rollouts: {len(initial_rollouts)}")
-                    # print(f"[device {device}] initial rollouts: {initial_rollouts}")
-                    for outputs in all_outputs:
-                        # print(f"outputs.outputs length: {len(outputs.outputs)}")
-                        output = outputs.outputs[0]
-                        initial_rollouts.append(output.text)
-                    # print(f"[device {device}] initial rollouts: {initial_rollouts}")
-                    all_prefixes = [
-                        sample_prefixes(rollout, 10) for rollout in initial_rollouts
-                    ]
-                    all_responses = []
-                    all_rewards = []
-                    for i, prefixes in enumerate(all_prefixes):
-                        problem = ordered_set_of_problems[i]
-                        ground_truth = all_ground_truths[i * self.num_generations]
-                        for prefix in prefixes:
-                            conv = build_conv(problem)
-                            prompt_text = maybe_apply_chat_template({"prompt": conv}, self.processing_class)["prompt"]
-                            prompt_text += prefix
-                        # convs = [build_conv(problem, prefix) for prefix in prefixes]
-                        # prompts_text = []
-                        # for conv in convs:
-                        #     # print(f"[device {device}] conv: {conv}")
-                        #     prompt_text = maybe_apply_chat_template({"prompt": conv}, self.processing_class)["prompt"]
-                            # if conv[-1]["content"] != "<think>\n":
-                            prompt_text += """
-    Time is up.
-    Given the time I've spent and the approaches I've tried, I should stop thinking and formulate a final answer based on what I already have.
-    </think>
-    """
-                            prompts_text.append(prompt_text)
-
-                        # prompts_text = [maybe_apply_chat_template({"prompt": conv}, self.processing_class)["prompt"] for conv in convs]
-                        all_outputs = self.llm.generate(
-                            prompts_text, sampling_params=self.sampling_params_prm, use_tqdm=False
-                        )
-
-                        avg_rewards = []
-                        for j in range(len(prefixes)):
-                            outputs = all_outputs[j]
-                            rewards = []
-                            responses = []
-                            for output in outputs.outputs:
-                                response = output.text
-                                responses.append(response)
-                                rewards.append(evaluate_answer(ground_truth, response))
-                            avg_rewards.append(sum(rewards) / len(rewards))
-                        all_rewards.append(avg_rewards)
-                    # all_responses.append(responses)
-                        # response = outputs.outputs[0].text
-                        # responses.append(response)
-                        # rewards.append(evaluate_answer(ground_truth, response))
-                    # for outputs in all_outputs:
-                    #     print(f"[device {device}] outputs length: {len(outputs.outputs)}")
-                    #     response = outputs.outputs[0].text
-                    #     responses.append(response)
-                    #     rewards.append(evaluate_answer(ground_truth, response))
-                    # all_responses.append(responses)
-                    # all_rewards.append(rewards)
-                
-                # print(f"[device {device}] all responses: {all_responses}")
-                    # print(f"[device {device}] all rewards: {all_rewards}")
-                    # print(f"[device {device}] all prefixes: {all_prefixes}")
-                    selected_prefixes, selected_rewards = self._select_responses_and_rewards(all_rewards, all_prefixes)
-                    # print(f"[device {device}] selected prefixes: {selected_prefixes}")
-                    # print(f"[device {device}] selected rewards: {selected_rewards}")
-                # convs = [build_conv(problem, prefix) for problem, prefix in zip(ordered_set_of_problems, selected_prefixes) for _ in range(self.num_generations)]
-                all_prompts = [build_conv(problem, prefix) for problem, prefix in zip(ordered_set_of_problems, selected_prefixes) for _ in range(self.num_generations)]
-                base_rewards = [reward for reward in selected_rewards for _ in range(self.num_generations)]
-                all_prompts_text = []
-                for prompt in all_prompts:
-                    #print(f"[device {device}] prompt: {prompt}")
-                    prompt_text = self.processing_class.apply_chat_template(
-                        prompt[:-1], tokenize=False, continue_final_message=False, add_generation_prompt=True, return_tensors="pt"
-                    )
-                    prompt_text += prompt[-1]["content"]
-                    # print(f"[device {device}] tokenized prompt: {prompt_text}")
-                    # prompt_text = maybe_apply_chat_template({"prompt": prompt}, self.processing_class)["prompt"]
-                    # print(f"[device {device}] prompt text: {prompt_text}")
-                    all_prompts_text.append(prompt_text)
-                # all_prompts_text = [maybe_apply_chat_template({"prompt": prompt}, self.processing_class)["prompt"] for prompt in all_prompts]
-                ordered_set_of_prompts = list(dict.fromkeys(all_prompts_text))
-                all_outputs = self.llm.generate(
-                    ordered_set_of_prompts, sampling_params=self.sampling_params, use_tqdm=False
-                )
+                generated_prompts = self._gen_trajectories(seeker_instructions, provider_instructions, num_prompts, max_turns, termination_phrase)
+                all_prompts = [prompt_list for prompt_list in generated_prompts for _ in range(num_gens)] 
+                # outputs = self.llm.chat(generated_prompts, sampling_params=self.sampling_params, use_tqdm=False)
+                all_outputs = self.llm.chat(generated_prompts, sampling_params=self.sampling_params, use_tqdm=False)
                 completion_ids = []
-                for outputs in all_outputs:
+                for i, outputs in enumerate(all_outputs):
+                    has_final_diagnosis = False
+                    for output in outputs.outputs:
+                        if "final diagnosis" in self.processing_class.decode(output.token_ids).lower():
+                            has_final_diagnosis = True
+                            break
+                    if not has_final_diagnosis:
+                        replace_idx = random.randint(0, len(outputs.outputs) - 1)
+                        new_text = f"**Final Diagnosis:** {all_ground_truths[i * self.num_generations]}"
+                        new_token_ids = self.processing_class.encode(new_text)
+                        outputs.outputs[replace_idx].text = new_text
+                        outputs.outputs[replace_idx].token_ids = new_token_ids
+                    
                     for output in outputs.outputs:
                         completion_ids.append(output.token_ids)
+                # completion_ids = [out.token_ids for completions in outputs for out in completions.outputs]
+
             else:
-                completion_ids = [None] * len(all_problems)
-                all_prompts = [None] * len(all_problems)
-                all_prompts_text = [None] * len(all_problems)
-                base_rewards = [None] * len(all_problems)
-            
+                all_prompts = [None] * len(all_ground_truths)
+                completion_ids = [None] * len(all_ground_truths)
             # Broadcast the completions from the main process to all processes, ensuring each process receives its
             # corresponding slice.
-            all_prompts = broadcast_object_list(all_prompts, from_process=0)
-            base_rewards = broadcast_object_list(base_rewards, from_process=0)
-            # print(f"[device {device}] all prompts: {all_prompts}")
-            # print(f"[device {device}] all rewards: {base_rewards}")
-            all_prompts_text = broadcast_object_list(all_prompts_text, from_process=0)
             completion_ids = broadcast_object_list(completion_ids, from_process=0)
+            all_prompts = broadcast_object_list(all_prompts, from_process=0)
+            
             process_slice = slice(
-                self.accelerator.process_index * len(prompts),
-                (self.accelerator.process_index + 1) * len(prompts),
+                self.accelerator.process_index * len(initial_prompts),
+                (self.accelerator.process_index + 1) * len(initial_prompts),
             )
-            # print(f"[device {device}] all prompts: {len(all_prompts)}")
-            # print(f"[device {device}] all prompts text: {len(all_prompts_text)}")
-            # print(f"[device {device}] completion ids: {len(completion_ids)}")
-
-            # print(f"[device {device}] process slice: {process_slice}")
+            
+            completion_ids = completion_ids[process_slice]
             prompts = all_prompts[process_slice]
-            prompts_text = all_prompts_text[process_slice]
-            # base_rewards = all_rewards[process_slice]
-            # print(f"[device {device}] base_rewards: {base_rewards}")
-            # print(f"[device {device}] prompts: {prompts}")
-            # print(f"[device {device}] prompts text: {prompts_text}")
+            
+            prompts_text = self.processing_class.apply_chat_template(prompts, tokenize=False, return_tensors="pt", add_generation_prompt=True)
+            
             prompt_inputs = self.processing_class(
                 prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
             )
+
             prompt_inputs = super()._prepare_inputs(prompt_inputs)
             prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
-
+            
             if self.max_prompt_length is not None:
                 prompt_ids = prompt_ids[:, -self.max_prompt_length :]
                 prompt_mask = prompt_mask[:, -self.max_prompt_length :]
-
-            completion_ids = completion_ids[process_slice]
 
             # Pad the completions, and concatenate them with the prompts
             completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
@@ -896,6 +824,18 @@ class GRPOTrainer(Trainer):
                     prompt_ids, attention_mask=prompt_mask, generation_config=self.generation_config
                 )
 
+            prompts_text = [maybe_apply_chat_template(example, self.processing_class)["prompt"] for example in inputs]
+        
+            prompt_inputs = self.processing_class(
+                prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
+            )
+            prompt_inputs = super()._prepare_inputs(prompt_inputs)
+            prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
+
+            if self.max_prompt_length is not None:
+                prompt_ids = prompt_ids[:, -self.max_prompt_length :]
+                prompt_mask = prompt_mask[:, -self.max_prompt_length :]
+                
             # Compute prompt length and extract completion ids
             prompt_length = prompt_ids.size(1)
             prompt_ids = prompt_completion_ids[:, :prompt_length]
@@ -971,19 +911,10 @@ class GRPOTrainer(Trainer):
         # Gather the reward per function: this part is crucial, because the rewards are normalized per group and the
         # completions may be distributed across processes
         rewards_per_func = gather(rewards_per_func)
-        # base_rewards = gather(base_rewards)
 
-        
         # Apply weights to each reward function's output and sum
-        base_rewards_tensor = torch.tensor(base_rewards, device=device)
-        # Subtract base_rewards from only the first column (index 0)
-        # print(f"[device {device}] before rewards per func: {rewards_per_func}")
-        rewards_per_func[:, 0] -= base_rewards_tensor
-        # print(f"[device {device}] base rewards: {base_rewards}")
-        # print(f"[device {device}] after rewards per func: {rewards_per_func}")
         rewards = (rewards_per_func * self.reward_weights.to(device).unsqueeze(0)).sum(dim=1)
 
-        
         # Compute grouped-wise rewards
         mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
         std_grouped_rewards = rewards.view(-1, self.num_generations).std(dim=1)
@@ -991,7 +922,7 @@ class GRPOTrainer(Trainer):
         # Normalize the rewards to compute the advantages
         mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
         std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
-        advantages = rewards
+        advantages = rewards #(rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
 
         # Slice to keep only the local part of the data
         process_slice = slice(
