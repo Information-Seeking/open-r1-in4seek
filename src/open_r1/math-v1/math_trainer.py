@@ -502,7 +502,7 @@ class GRPOTrainer(Trainer):
                 # Sampling parameters
                 self.sampling_params = SamplingParams(
                     temperature=args.temperature,
-                    max_tokens=self.max_completion_length,
+                    max_tokens=4096,
                     guided_decoding=guided_decoding,
                     n=args.num_generations,
                 )
@@ -513,7 +513,7 @@ class GRPOTrainer(Trainer):
                 )
                 self.sampling_params_prm = SamplingParams(
                     temperature=args.temperature,
-                    max_tokens=self.max_completion_length,
+                    max_tokens=4096,
                     guided_decoding=guided_decoding,
                     n=10,
                 )
