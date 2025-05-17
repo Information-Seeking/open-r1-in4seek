@@ -141,14 +141,14 @@ def info_gain_reward(completions, prompts, ground_truth, case_vignette, choices,
     # subtract the baseline SR from the other SRs
     advantages = [rewards_list[i] - rewards_list[-1] for i in range(len(rewards_list) - 1)]
 
-    print(f"completions: {completions}")
-    print(f"answers: {answers}")
-    print(f"ground_truth: {ground_truth[0]}")
-    print(f"mcq_prompt example: {mcq_prompt_list[0]}")
-    print(f"provider_prompt example: {provider_prompt_list[0]}")
-    print(f"mcq diagnosis list: {mcq_response_list}")
-    print(f"frq diagnosis list: {frq_diagnosis_list}")
-    print(f"eval prompt example: {eval_prompt_list[0]}")
+    # print(f"completions: {completions}")
+    # print(f"answers: {answers}")
+    # print(f"ground_truth: {ground_truth[0]}")
+    # print(f"mcq_prompt example: {mcq_prompt_list[0]}")
+    # print(f"provider_prompt example: {provider_prompt_list[0]}")
+    # print(f"mcq diagnosis list: {mcq_response_list}")
+    # print(f"frq diagnosis list: {frq_diagnosis_list}")
+    # print(f"eval prompt example: {eval_prompt_list[0]}")
     print(f"mcq success rates: {mcq_success_rate_list}")
     print(f"frq success rates: {frq_success_rate_list}")
     print(f"rewards: {rewards_list}")
