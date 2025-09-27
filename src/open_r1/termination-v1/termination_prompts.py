@@ -49,6 +49,12 @@ def build_conv(system_prompt, prompts, responses, role1 = "user", role2 = "assis
 
         return dialogue
 
+def helper_eval_responses(res):
+    if "yes" in res.lower():
+        return 1
+    else:
+        return 0
+
 def get_doctor_prompt():
     system_prompt = "You are an AI doctor."
     system_prompt += " Arrive at a diagnosis of a patient's medical condition."

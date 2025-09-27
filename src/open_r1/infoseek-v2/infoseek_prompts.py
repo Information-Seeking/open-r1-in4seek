@@ -68,7 +68,7 @@ def get_patient_prompt(case_desc):
     system_prompt += " You have to describe your symptoms from the given case vignette based on the questions asked."
     system_prompt += " Do not break character and reveal that you are describing symptoms from the case vignette."
     system_prompt += " Do not generate any new symptoms or knowledge, otherwise you will be penalized."
-    system_prompt += " Do not reveal more information than what the question asks."
+    system_prompt += " Do not reveal more information than what the question asks, otherwise you will be penalized."
     system_prompt += " Keep your answer short, to only 1 sentence."
     system_prompt += " Simplify terminology used in the given paragraph to layman language."
     system_prompt += f"\n**Case Vignette**: {case_desc}"

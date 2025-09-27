@@ -765,7 +765,6 @@ class GRPOTrainer(Trainer):
                 generated_prompts = self._gen_trajectories(seeker_instructions, provider_instructions, num_prompts, max_turns, termination_phrase)
                 all_prompts = [prompt_list for prompt_list in generated_prompts for _ in range(num_gens)] 
                 outputs = self.llm.chat(generated_prompts, sampling_params=self.sampling_params, use_tqdm=False)
-                
                 completion_ids = [out.token_ids for completions in outputs for out in completions.outputs]
 
             else:
